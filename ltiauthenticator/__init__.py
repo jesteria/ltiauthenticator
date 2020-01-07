@@ -1,6 +1,6 @@
 import time
 
-from traitlets import Dict
+from traitlets import Dict, Unicode
 from tornado import gen, web
 
 from jupyterhub.auth import Authenticator
@@ -10,7 +10,9 @@ from jupyterhub.utils import url_path_join
 from oauthlib.oauth1.rfc5849 import signature
 from collections import OrderedDict
 
+
 __version__ = '0.4.0'
+
 
 class LTILaunchValidator:
     # Record time when process starts, so we can reject requests made
@@ -21,8 +23,9 @@ class LTILaunchValidator:
     # replay attacks. This possibly makes this non-threadsafe, however.
     nonces = OrderedDict()
 
-    def __init__(self, consumers):
+    def __init__(self, consumers, log):
         self.consumers = consumers
+        self.log = log
 
     def validate_launch_request(
             self,
@@ -93,6 +96,13 @@ class LTILaunchValidator:
         sign = signature.sign_hmac_sha1(base_string, consumer_secret, None)
         is_valid = signature.safe_string_equals(sign, args['oauth_signature'])
 
+        # Debugging
+        self.log.debug(f'LTI launch_url: {launch_url}')
+        self.log.debug(f'LTI base_string: {base_string}')
+        self.log.debug(f'LTI signatures (hub ? request): {sign!r} ' +
+                       ('==' if is_valid else '!=') +
+                       ' {oauth_signature!r}'.format(**args))
+
         if not is_valid:
             raise web.HTTPError(401, "Invalid oauth_signature")
 
@@ -104,8 +114,15 @@ class LTIAuthenticator(Authenticator):
     JupyterHub Authenticator for use with LTI based services (EdX, Canvas, etc)
     """
 
-    auto_login = True
-    login_service = 'LTI'
+    login_service = Unicode(
+        config=True,
+        default_value='LTI',
+    )
+
+    external_login_url = Unicode(
+        config=True,
+        default_value=None,
+    )
 
     consumers = Dict(
         {},
@@ -120,14 +137,14 @@ class LTIAuthenticator(Authenticator):
 
     def get_handlers(self, app):
         return [
-            ('/lti/launch', LTIAuthenticateHandler)
+            ('/lti/launch', LTIAuthenticateHandler),
         ]
 
 
     @gen.coroutine
     def authenticate(self, handler, data=None):
         # FIXME: Run a process that cleans up old nonces every other minute
-        validator = LTILaunchValidator(self.consumers)
+        validator = LTILaunchValidator(self.consumers, self.log)
 
         args = {}
         for k, values in handler.request.body_arguments.items():
@@ -155,11 +172,12 @@ class LTIAuthenticator(Authenticator):
             # 2. The request was sent from a Canvas course not running in anonymous mode
             # If this is the case we want to use the canvas ID to allow grade returns through the Canvas API
             # If Canvas is running in anonymous mode, we'll still want the 'user_id' (which is the `lti_user_id``)
-
-            canvas_id = handler.get_body_argument('custom_canvas_user_id', default=None)
-
-            if canvas_id is not None:
-                user_id = handler.get_body_argument('custom_canvas_user_id')
+            # However, custom_canvas_user_login_id trumps them all.
+            for attr_name in ('custom_canvas_user_login_id',
+                              'custom_canvas_user_id'):
+                user_id = handler.get_body_argument(attr_name, default=None)
+                if user_id:
+                    break
             else:
                 user_id = handler.get_body_argument('user_id')
 
@@ -170,6 +188,9 @@ class LTIAuthenticator(Authenticator):
 
 
     def login_url(self, base_url):
+        if self.external_login_url:
+            return self.external_login_url
+
         return url_path_join(base_url, '/lti/launch')
 
 
