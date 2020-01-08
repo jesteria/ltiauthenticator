@@ -121,7 +121,7 @@ class LTIAuthenticator(Authenticator):
 
     external_login_url = Unicode(
         config=True,
-        default_value=None,
+        default_value='',
     )
 
     consumers = Dict(
